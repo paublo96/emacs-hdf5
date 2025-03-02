@@ -63,13 +63,20 @@ class H5Instance:
         return meta
 
     def is_group(self, field: str) -> dict:
-        try:
+        true_or_false = False
+        if self.is_field(field):
             obj = self.instance[field]
             if isinstance(obj, h5py.Group):
                 return {"return": True}
-            return {"return": False}
-        except:
-            return {"return": False}
+        return {"return": true_or_false}
+
+    def is_field(self, field: str) -> dict:
+        true_or_false = field in self.instance
+        return {"return": true_or_false}
+
+    def get_attrs(self, root: str) -> dict:
+        obj = self.instance[root]
+        return {x[0]:str(x[1]) for x in obj.attrs.items()}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -77,12 +84,16 @@ if __name__ == "__main__":
                         help='File to parse')
     parser.add_argument('--get-fields', type=str,
                         help='Print fields within group')
+    parser.add_argument('--get-attrs', type=str,
+                        help='Print attributes of parent to root')
     parser.add_argument('--preview-field', type=str,
                         help='Print preview of requested field')
     parser.add_argument('--read-field', type=str,
                         help='Print field data')
     parser.add_argument('--is-group', type=str,
                         help='Print true if field is group')
+    parser.add_argument('--is-field', type=str,
+                        help='Print true if field exists in file')
     args = parser.parse_args()
 
     inst = H5Instance(args.filepath)
@@ -98,4 +109,10 @@ if __name__ == "__main__":
         exit(0)
     if args.is_group:
         print(json.dumps(inst.is_group(args.is_group)))
+        exit(0)
+    if args.is_field:
+        print(json.dumps(inst.is_field(args.is_field)))
+        exit(0)
+    if args.get_attrs:
+        print(json.dumps(inst.get_attrs(args.get_attrs)))
         exit(0)

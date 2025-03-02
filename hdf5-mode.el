@@ -1,4 +1,26 @@
-;;; hdf5-mode.el --- Major mode for viewing HDF5 files
+;;; hdf5-mode.el --- Major mode for viewing HDF5 files -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024-2025 Paul Minner, (Peter Mao -> Free Software Foundation, Inc.)
+
+;; Author: Paul Minner <minner.paul@gmail.com>, Peter Mao <peter.mao@gmail.com>
+;; Keywords: HDF5, data
+;; Version: 1.1
+;; Description: A major-mode for viewing HDF5 files.
+;; Homepage: https://github.com/paublo96/emacs-hdf5
+;; Package-Requires: ((emacs "27.1") (json "??"))
+
+;; GNU Emacs is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; GNU Emacs is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with GNU Emacs.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 ;; This package provides a major mode for viewing HDF5 files in Emacs.
@@ -7,8 +29,6 @@
 ;; in the same location as hdf5-mode.el.
 
 ;;; Code:
-
-(require 'python)
 (require 'json)
 
 (defgroup hdf5-mode nil
@@ -31,10 +51,16 @@
 (defvar hdf5-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") 'hdf5-read-field-at-cursor)
+    (define-key map (kbd "SPC") 'hdf5-read-field-at-cursor)
     (define-key map (kbd "/")   'hdf5-read-field)
     (define-key map (kbd "TAB") 'hdf5-preview-field-at-cursor)
     (define-key map (kbd "'")   'hdf5-preview-field)
     (define-key map (kbd "b")   'hdf5-back)
+    (define-key map (kbd "DEL") 'hdf5-back)
+    (define-key map (kbd "S-SPC") 'hdf5-back)
+    (define-key map (kbd "n")   'forward-line)
+    (define-key map (kbd "p")   'previous-line)
+    (define-key map (kbd "w")   'hdf5-copy-field-at-cursor)
     map)
   "Keymap for HDF5 mode")
 
@@ -46,29 +72,31 @@
 
 (defun hdf5-fix-path (path)
   "Remove extraneous '/'s from path"
-  (setq fsplit (file-name-split path))
-  (setq npath "")
-  (dolist (val fsplit)
-    (if (and (not (string= "" val))
-             (not (string-prefix-p "/" val)))
-        (setq npath (concat npath "/" val))))
-  (if (string-empty-p npath)
-      (setq npath "/"))
-  npath)
+  (let ((fsplit (file-name-split path))
+        (npath ""))
+    (dolist (val fsplit)
+      (if (and (not (string= "" val))
+               (not (string-prefix-p "/" val)))
+          (setq npath (concat npath "/" val))))
+    (if (string-empty-p npath)
+        (setq npath "/"))
+    npath))
 
 (defun hdf5-get-field-at-cursor ()
   "Return field at current cursor position"
   (goto-char (line-beginning-position))
-  (setq field (thing-at-point 'filename t))
-  (hdf5-fix-path (concat hdf5-mode-root "/" field)))
+  (let ((field (thing-at-point 'filename t)))
+    (hdf5-fix-path (concat hdf5-mode-root "/" field))))
 
 (defun hdf5-is-group (field)
   "Return t if field is a group"
-  (setq output (hdf5-parser-cmd
-                "--is-group" field
-                hdf5-mode-file))
-  (setq return (gethash "return" output))
-  (gethash "return" output))
+  (let ((output (hdf5-parser-cmd "--is-group" field hdf5-mode-file)))
+    (gethash "return" output)))
+
+(defun hdf5-is-field (field)
+  "Return t if FIELD is a field in the file."
+  (let ((output (hdf5-parser-cmd "--is-field" field hdf5-mode-file)))
+    (gethash "return" output)))
 
 (defun hdf5-parser-cmd (&rest args)
   "Run parser command with custom args and return json output"
@@ -86,13 +114,13 @@
                   (json-read))
               (json-readtable-error
                (error "Failed to read parser output: Invalid JSON"))))
-        (error "Parser script failed: %s" 
+        (error "Parser script failed: %s"
                (buffer-substring (point-min) (point-max)))))))
 
 (defun hdf5-back ()
   "Go back one group level and display to screen"
   (interactive)
-  (setq hdf5-mode-root
+  (setq-local hdf5-mode-root
         (hdf5-fix-path (file-name-directory hdf5-mode-root)))
   (hdf5-display-fields))
 
@@ -101,88 +129,109 @@
   (interactive)
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (setq output (hdf5-parser-cmd
-                  "--get-fields" hdf5-mode-root hdf5-mode-file))
     (insert (format "%s %s\n\n"
                     (propertize "Root:" 'face 'bold)
                     hdf5-mode-root))
-    (setq template "%-30s %-15s %-15s\n")
-    (insert (propertize (format template "*name*" "*dims*" "*type*")
-                        'face '('bold 'underline)))
-    (maphash (lambda (key val)
-               (setq type (gethash "type" val))
-               (if (string= type "group")
-                   (insert (format template
-                                   (format "%s/" key)
-                                   "N/A" "group"))
-                 (progn
-                   (setq shape (propertize (gethash "shape" val) 'face 'italic))
-                   (setq dtype (gethash "dtype" val))
-                   (insert (format template
-                                   key shape dtype)))))
-             output)
+    (let* ((output (hdf5-parser-cmd "--get-fields" hdf5-mode-root hdf5-mode-file))
+           (attrs  (hdf5-parser-cmd "--get-attrs"  hdf5-mode-root hdf5-mode-file))
+           (num-attrs (hash-table-count attrs))
+           (template "%-30s %-15s %-15s\n"))
+      (insert (propertize (format template "*name*" "*dims*" "*type*")
+                          'face '('bold 'underline)))
+      (maphash (lambda (key val)
+                 (let ((type  (gethash "type"  val))
+                       (attrs (gethash "attrs" val nil)))
+                   (cond ((string= type "group")
+                          (insert (format template
+                                          (format "%s/" key)
+                                          "N/A" "group")))
+                         ((string= type "dataset")
+                          (let ((shape (propertize (gethash "shape" val) 'face 'italic))
+                                (dtype (gethash "dtype" val)))
+                            (insert (format template
+                                            key shape dtype)))))))
+               output)
+      (when (> num-attrs 0)
+        (insert "\n\n")
+        (insert (propertize (format template "*attribute*" "*value*" "")
+                            'face '('bold 'underline)))
+        (maphash (lambda (attrkey attrval)
+                   (insert (format template attrkey attrval "")))
+                 attrs)))
     (goto-char (point-min))
-    (forward-line)
-    (forward-line)
-    (forward-line)
+    (forward-line 3)
     (set-buffer-modified-p nil)))
 
 (defun hdf5-preview-field-at-cursor ()
   "Display field contents at cursor in message box"
   (interactive)
-  (setq field (hdf5-get-field-at-cursor))
-  (hdf5-preview-field field))
+  (let ((field (hdf5-get-field-at-cursor)))
+    (hdf5-preview-field field)))
 
 (defun hdf5-preview-field (field)
   "Display selected field contents in message box"
   (interactive "sEnter path: ")
-  (setq field (hdf5-fix-path field))
-  (setq output (hdf5-parser-cmd "--preview-field" field hdf5-mode-file))
-  (message (format "%s %s %s:\n%s"
-                   (propertize field 'face 'bold)
-                   (propertize (gethash "shape" output) 'face 'italic)
-                   (gethash "dtype" output)
-                   (gethash "data" output))))
+  (when (hdf5-is-field field)
+    (let ((field  (hdf5-fix-path field))
+          (output (hdf5-parser-cmd "--preview-field" field hdf5-mode-file)))
+      (message (format "%s %s %s:\n%s"
+                       (propertize field 'face 'bold)
+                       (propertize (gethash "shape" output "") 'face 'italic)
+                       (gethash "dtype" output "")
+                       (gethash "data" output))))))
 
 (defun hdf5-read-field-at-cursor ()
   "Display field contents at cursor in new buffer"
   (interactive)
-  (setq field (hdf5-get-field-at-cursor))
-  (hdf5-read-field field))
+  (let ((field (hdf5-get-field-at-cursor)))
+    (hdf5-read-field field)))
 
 (defun hdf5-read-field (field)
   "Display specified field contents in new buffer"
   (interactive "sEnter path: ")
-  (setq field (hdf5-fix-path field))
-  (if (hdf5-is-group field)
-      (progn
-        (setq hdf5-mode-root field)
-        (hdf5-display-fields))
-    (progn
-      (setq output (hdf5-parser-cmd "--read-field" field hdf5-mode-file))
-      (setq data (gethash "data" output))
-      (setq parent-buf (current-buffer))
-      (with-current-buffer (get-buffer-create (format "*%s%s*" parent-buf field))
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (setq truncate-lines t)
-          (insert (format "%s %s %s:\n%s\n"
-                          (propertize field 'face 'bold)
-                          (propertize (gethash "shape" output) 'face 'italic)
-                          (gethash "dtype" output)
-                          (gethash "data" output)))
-          (goto-char (point-min))
-          (special-mode)
-          (display-buffer (current-buffer) '((display-buffer-same-window))))))))
+  (let ((field (hdf5-fix-path field)))
+    (when (hdf5-is-field field)
+      (if (hdf5-is-group field)
+          (progn
+            (setq-local hdf5-mode-root field)
+            (hdf5-display-fields))
+        (let* ((output (hdf5-parser-cmd "--read-field" field hdf5-mode-file))
+               (data (gethash "data" output))
+               (parent-buf (current-buffer)))
+          (with-current-buffer (get-buffer-create (format "*%s%s*" parent-buf field))
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (setq-local truncate-lines t)
+              (insert (format "%s %s %s:\n%s\n"
+                              (propertize field 'face 'bold)
+                              (propertize (gethash "shape" output) 'face 'italic)
+                              (gethash "dtype" output)
+                              (gethash "data" output)))
+              (goto-char (point-min))
+              (special-mode)
+              (display-buffer (current-buffer) '((display-buffer-same-window))))))))))
 
+(defun hdf5-copy-field-at-cursor ()
+  "Interactively put field-at-cursor into the kill ring"
+  (interactive)
+  (let* ((field-name (hdf5-get-field-at-cursor))
+         (field-type (if (hdf5-is-field field-name) "field" "attribute")))
+    (kill-new field-name)
+    (message (format "Copied HD5 %s name: %s" field-type field-name))))
+
+;;;###autoload
 (define-derived-mode hdf5-mode special-mode "HDF5"
   "Major mode for viewing HDF5 files"
-  (setq buffer-read-only t)
-  (setq hdf5-mode-file buffer-file-name)
-  (setq hdf5-mode-root "/")
+  (setq-local buffer-read-only t)
+  (setq-local hdf5-mode-file buffer-file-name)
+  (setq-local hdf5-mode-root "/")
   (hdf5-display-fields))
 
+;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.h5\\'" . hdf5-mode))
+;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.hdf5\\'" . hdf5-mode))
 
 (provide 'hdf5-mode)
+
+;;; hdf5-mode.el ends here
